@@ -1417,28 +1417,13 @@ async def handle_join_request(
         )
 
     # -----------------------------------------------------
-    # STEP 2: REQUIRED CHANNEL CHECK
+    # IMPORTANT: REQUIRED CHANNEL IS ONLY FOR USING THIS BOT.
+    # It must NOT block or delay a user's join request.
+    # The request is handled independently of the requester\'s
+    # Required Channel membership.
     # -----------------------------------------------------
 
-    if not await is_required_channel_member(context.bot, user.id):
-        try:
-            await context.bot.send_message(
-                chat_id=request.user_chat_id,
-                text=(
-                    "🔒 <b>Required Channel Join করুন</b>\n\n"
-                    "আপনার Join Request approve করার আগে Required Channel-এ Join করতে হবে."
-                ),
-                parse_mode="HTML",
-                reply_markup=required_channel_keyboard()
-            )
-        except Exception:
-            pass
-        logger.info("Join request held because user is not in required channel: %s", user.id)
-        return
-
-    # -----------------------------------------------------
-    # STEP 3: CHECK AUTO ACCEPT
-    # -----------------------------------------------------
+    # CHECK AUTO ACCEPT
 
     if not row["auto_accept"]:
 
