@@ -1476,8 +1476,23 @@ def main():
         ChatJoinRequestHandler(
             handle_join_request
         )
-    )
+        # Admin Panel
+application.add_handler(
+    CommandHandler("admin", admin_panel)
+)
 
+application.add_handler(
+    CommandHandler("cancel", cancel_broadcast)
+)
+
+application.add_handler(
+    CallbackQueryHandler(
+        admin_callback_router,
+        pattern=r"^admin_"
+    )
+)
+    
+    
     # Inline buttons
     application.add_handler(
         CallbackQueryHandler(
