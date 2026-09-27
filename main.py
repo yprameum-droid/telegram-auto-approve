@@ -1485,7 +1485,9 @@ async def handle_join_request(
             chat_id=request.user_chat_id,
             text=(
                 "✅ <b>Your Join Request Has Been Approved!</b>\n\n"
+                f"👤 <b>{escape(user.full_name or user.first_name or '')}</b>\n"
                 f"📢 <b>{escape(chat.title or '')}</b>\n\n"
+                "Your request has been approved successfully.\n"
                 "You can now access the chat."
             ),
             parse_mode="HTML"
