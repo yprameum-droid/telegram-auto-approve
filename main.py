@@ -23,7 +23,6 @@ from telegram.ext import (
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 REQUIRED_CHANNEL = os.getenv(
     "REQUIRED_CHANNEL",
@@ -35,11 +34,13 @@ REQUIRED_CHANNEL_LINK = os.getenv(
     "https://t.me/YourRequiredChannel"
 )
 
-DB_FILE = "bot.sqlite3"
+DATABASE_FILE = "bot_data.sqlite3"
 
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing")
+    raise RuntimeError(
+        "BOT_TOKEN is missing. Add BOT_TOKEN in Railway Variables."
+    )
 
 
 # =========================================================
@@ -58,34 +59,35 @@ logger = logging.getLogger(__name__)
 # DATABASE
 # =========================================================
 
-def connect_db():
-    conn = sqlite3.connect(
-        DB_FILE,
+def db():
+    connection = sqlite3.connect(
+        DATABASE_FILE,
         check_same_thread=False
     )
-    conn.row_factory = sqlite3.Row
-    return conn
+
+    connection.row_factory = sqlite3.Row
+
+    return connection
 
 
-def init_db():
+def init_database():
 
-    conn = connect_db()
-    cur = conn.cursor()
+    connection = db()
+    cursor = connection.cursor()
 
-    cur.execute("""
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS chats (
             chat_id INTEGER PRIMARY KEY,
             title TEXT NOT NULL,
             username TEXT,
             chat_type TEXT NOT NULL,
-            owner_id INTEGER NOT NULL,
-            auto_accept INTEGER DEFAULT 1,
-            welcome_enabled INTEGER DEFAULT 1,
-            welcome_message TEXT DEFAULT ''
+            auto_accept INTEGER NOT NULL DEFAULT 1,
+            added_by INTEGER,
+            added_at INTEGER
         )
     """)
 
-    cur.execute("""
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             first_name TEXT,
@@ -93,16 +95,16 @@ def init_db():
         )
     """)
 
-    conn.commit()
-    conn.close()
+    connection.commit()
+    connection.close()
 
 
 def save_user(user):
 
-    conn = connect_db()
-    cur = conn.cursor()
+    connection = db()
+    cursor = connection.cursor()
 
-    cur.execute("""
+    cursor.execute("""
         INSERT OR REPLACE INTO users
         (user_id, first_name, username)
         VALUES (?, ?, ?)
@@ -112,153 +114,135 @@ def save_user(user):
         user.username or ""
     ))
 
-    conn.commit()
-    conn.close()
+    connection.commit()
+    connection.close()
 
 
-def save_chat(
-    chat,
-    owner_id,
-    auto_accept=1
-):
+def save_chat(chat, added_by=None):
 
-    conn = connect_db()
-    cur = conn.cursor()
+    connection = db()
+    cursor = connection.cursor()
 
-    cur.execute("""
-        INSERT INTO chats
+    cursor.execute("""
+        INSERT OR IGNORE INTO chats
         (
             chat_id,
             title,
             username,
             chat_type,
-            owner_id,
-            auto_accept
+            auto_accept,
+            added_by,
+            added_at
         )
-        VALUES (?, ?, ?, ?, ?, ?)
-
-        ON CONFLICT(chat_id)
-        DO UPDATE SET
-            title=excluded.title,
-            username=excluded.username,
-            chat_type=excluded.chat_type
+        VALUES (?, ?, ?, ?, 1, ?, strftime('%s','now'))
     """, (
         chat.id,
-        chat.title or "",
+        chat.title or "Unknown",
         chat.username,
         chat.type,
-        owner_id,
-        auto_accept
+        added_by
     ))
 
-    conn.commit()
-    conn.close()
+    cursor.execute("""
+        UPDATE chats
+        SET
+            title = ?,
+            username = ?,
+            chat_type = ?
+        WHERE chat_id = ?
+    """, (
+        chat.title or "Unknown",
+        chat.username,
+        chat.type,
+        chat.id
+    ))
+
+    connection.commit()
+    connection.close()
 
 
 def get_chat(chat_id):
 
-    conn = connect_db()
-    cur = conn.cursor()
+    connection = db()
+    cursor = connection.cursor()
 
-    cur.execute(
-        "SELECT * FROM chats WHERE chat_id=?",
-        (chat_id,)
-    )
-
-    row = cur.fetchone()
-
-    conn.close()
-
-    return row
-
-
-def get_user_chats(
-    user_id,
-    chat_type
-):
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    cur.execute("""
+    cursor.execute("""
         SELECT *
         FROM chats
-        WHERE owner_id=?
-        AND chat_type=?
+        WHERE chat_id = ?
+    """, (chat_id,))
+
+    result = cursor.fetchone()
+
+    connection.close()
+
+    return result
+
+
+def get_user_chats(user_id, chat_types):
+
+    connection = db()
+    cursor = connection.cursor()
+
+    placeholders = ",".join(
+        ["?"] * len(chat_types)
+    )
+
+    cursor.execute(
+        f"""
+        SELECT *
+        FROM chats
+        WHERE chat_type IN ({placeholders})
         ORDER BY title
-    """, (
-        user_id,
-        chat_type
-    ))
+        """,
+        chat_types
+    )
 
-    rows = cur.fetchall()
+    rows = cursor.fetchall()
 
-    conn.close()
+    connection.close()
 
+    # Only return chats where the user is currently an admin.
     return rows
 
 
-def set_auto_accept(
-    chat_id,
-    value
-):
+def set_auto_accept(chat_id, enabled):
 
-    conn = connect_db()
-    cur = conn.cursor()
+    connection = db()
+    cursor = connection.cursor()
 
-    cur.execute("""
+    cursor.execute("""
         UPDATE chats
-        SET auto_accept=?
-        WHERE chat_id=?
-    """, (
-        1 if value else 0,
-        chat_id
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def set_welcome(
-    chat_id,
-    enabled
-):
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE chats
-        SET welcome_enabled=?
-        WHERE chat_id=?
+        SET auto_accept = ?
+        WHERE chat_id = ?
     """, (
         1 if enabled else 0,
         chat_id
     ))
 
-    conn.commit()
-    conn.close()
+    connection.commit()
+    connection.close()
 
 
-def remove_chat(chat_id):
+def delete_chat(chat_id):
 
-    conn = connect_db()
-    cur = conn.cursor()
+    connection = db()
+    cursor = connection.cursor()
 
-    cur.execute(
-        "DELETE FROM chats WHERE chat_id=?",
-        (chat_id,)
-    )
+    cursor.execute("""
+        DELETE FROM chats
+        WHERE chat_id = ?
+    """, (chat_id,))
 
-    conn.commit()
-    conn.close()
+    connection.commit()
+    connection.close()
 
 
 # =========================================================
 # REQUIRED CHANNEL
 # =========================================================
 
-async def check_required_channel(
+async def is_required_channel_member(
     bot,
     user_id
 ):
@@ -276,11 +260,11 @@ async def check_required_channel(
             "creator"
         )
 
-    except Exception as e:
+    except Exception as error:
 
         logger.warning(
-            "Required channel check failed: %s",
-            e
+            "Required channel membership check failed: %s",
+            error
         )
 
         return False
@@ -304,7 +288,7 @@ def required_channel_keyboard():
     ])
 
 
-async def gate(
+async def check_gate(
     update,
     context
 ):
@@ -316,16 +300,12 @@ async def gate(
 
     save_user(user)
 
-    # Owner bypass
-    if OWNER_ID and user.id == OWNER_ID:
-        return True
-
-    ok = await check_required_channel(
+    member = await is_required_channel_member(
         context.bot,
         user.id
     )
 
-    if ok:
+    if member:
         return True
 
     message = update.effective_message
@@ -335,9 +315,9 @@ async def gate(
         await message.reply_text(
             "🔒 <b>Channel Join Required</b>\n\n"
             "এই Bot ব্যবহার করার আগে আমাদের "
-            "Required Channel-এ Join করতে হবে.\n\n"
-            "1️⃣ Channel-এ Join করুন\n"
-            "2️⃣ তারপর <b>Check Membership</b> চাপুন.",
+            "Required Channel-এ Join করুন.\n\n"
+            "প্রথমে Channel-এ Join করুন, "
+            "তারপর নিচের Check Membership চাপুন.",
             parse_mode="HTML",
             reply_markup=required_channel_keyboard()
         )
@@ -346,10 +326,10 @@ async def gate(
 
 
 # =========================================================
-# ADMIN CHECK
+# CHAT ADMIN CHECK
 # =========================================================
 
-async def user_is_admin(
+async def is_chat_admin(
     bot,
     chat_id,
     user_id
@@ -367,7 +347,12 @@ async def user_is_admin(
             "creator"
         )
 
-    except Exception:
+    except Exception as error:
+
+        logger.warning(
+            "Admin check failed: %s",
+            error
+        )
 
         return False
 
@@ -381,17 +366,13 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user = update.effective_user
-
-    save_user(user)
-
-    if not await gate(
+    if not await check_gate(
         update,
         context
     ):
         return
 
-    await send_main_menu(
+    await show_main_menu(
         update,
         context
     )
@@ -401,7 +382,7 @@ async def start(
 # MAIN MENU
 # =========================================================
 
-async def send_main_menu(
+async def show_main_menu(
     update,
     context
 ):
@@ -411,13 +392,12 @@ async def send_main_menu(
     text = (
         f"👋 Hello <b>{escape(user.first_name)}</b>\n\n"
         "🤖 <b>Join Request Management Bot</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
         "This bot helps you:\n\n"
         "✅ Manage join requests for your "
-        "channels and groups\n"
+        "groups and channels\n"
         "📢 Automatically approve requests\n"
-        "⚙️ Control Auto Accept individually\n"
-        "📋 Manage all connected chats\n\n"
+        "⚙️ Control each chat separately\n\n"
         "👇 Choose an option:"
     )
 
@@ -444,10 +424,6 @@ async def send_main_menu(
         ],
         [
             InlineKeyboardButton(
-                "🌐 Language",
-                callback_data="language"
-            ),
-            InlineKeyboardButton(
                 "ℹ️ Help",
                 callback_data="help"
             )
@@ -462,10 +438,10 @@ async def send_main_menu(
 
 
 # =========================================================
-# MEMBERSHIP BUTTON
+# MEMBERSHIP CHECK BUTTON
 # =========================================================
 
-async def check_membership_button(
+async def check_membership(
     update,
     context
 ):
@@ -474,7 +450,7 @@ async def check_membership_button(
 
     await query.answer()
 
-    ok = await check_required_channel(
+    ok = await is_required_channel_member(
         context.bot,
         query.from_user.id
     )
@@ -482,8 +458,9 @@ async def check_membership_button(
     if not ok:
 
         await query.edit_message_text(
-            "❌ <b>Membership not found</b>\n\n"
-            "আগে Required Channel-এ Join করুন.",
+            "❌ <b>Membership Not Found</b>\n\n"
+            "আপনি এখনো Required Channel-এ "
+            "Join করেননি.",
             parse_mode="HTML",
             reply_markup=required_channel_keyboard()
         )
@@ -519,13 +496,19 @@ async def check_membership_button(
                     "👥 My Groups",
                     callback_data="my_groups"
                 )
+            ],
+            [
+                InlineKeyboardButton(
+                    "ℹ️ Help",
+                    callback_data="help"
+                )
             ]
         ])
     )
 
 
 # =========================================================
-# ADD CHANNEL / GROUP
+# ADD CHANNEL
 # =========================================================
 
 async def add_channel(
@@ -537,10 +520,10 @@ async def add_channel(
 
     await query.answer()
 
-    username = context.bot.username
+    bot_username = context.bot.username
 
-    link = (
-        f"https://t.me/{username}"
+    add_link = (
+        f"https://t.me/{bot_username}"
         f"?startchannel"
         f"&admin=invite_users"
     )
@@ -549,36 +532,39 @@ async def add_channel(
         [
             InlineKeyboardButton(
                 "➕ Add Bot to Channel",
-                url=link
+                url=add_link
             )
         ],
         [
             InlineKeyboardButton(
-                "🔄 Verify Channel",
-                callback_data="refresh_chats"
+                "🔄 Check My Channels",
+                callback_data="my_channels"
             )
         ],
         [
             InlineKeyboardButton(
                 "⬅️ Back",
-                callback_data="back_menu"
+                callback_data="back"
             )
         ]
     ])
 
     await query.edit_message_text(
         "📢 <b>Add a New Channel</b>\n\n"
-        "1️⃣ নিচের button চাপুন\n"
-        "2️⃣ আপনার Channel select করুন\n"
+        "1️⃣ নিচের Add Button চাপুন\n"
+        "2️⃣ আপনার Channel নির্বাচন করুন\n"
         "3️⃣ Bot-কে Administrator করুন\n"
-        "4️⃣ <b>Invite Users via Link / Manage Join Requests</b> "
-        "permission দিন\n\n"
-        "Bot Admin হলে channel automatically "
-        "<b>My Channels</b>-এ যুক্ত হবে.",
+        "4️⃣ <b>Invite Users via Link</b> permission দিন\n\n"
+        "Bot Admin হলে Channel automatically "
+        "আপনার My Channels list-এ যুক্ত হবে.",
         parse_mode="HTML",
         reply_markup=keyboard
     )
 
+
+# =========================================================
+# ADD GROUP
+# =========================================================
 
 async def add_group(
     update,
@@ -589,10 +575,10 @@ async def add_group(
 
     await query.answer()
 
-    username = context.bot.username
+    bot_username = context.bot.username
 
-    link = (
-        f"https://t.me/{username}"
+    add_link = (
+        f"https://t.me/{bot_username}"
         f"?startgroup=addbot"
         f"&admin=invite_users"
     )
@@ -601,31 +587,31 @@ async def add_group(
         [
             InlineKeyboardButton(
                 "➕ Add Bot to Group",
-                url=link
+                url=add_link
             )
         ],
         [
             InlineKeyboardButton(
-                "🔄 Verify Group",
-                callback_data="refresh_chats"
+                "🔄 Check My Groups",
+                callback_data="my_groups"
             )
         ],
         [
             InlineKeyboardButton(
                 "⬅️ Back",
-                callback_data="back_menu"
+                callback_data="back"
             )
         ]
     ])
 
     await query.edit_message_text(
         "👥 <b>Add a New Group</b>\n\n"
-        "1️⃣ নিচের button চাপুন\n"
-        "2️⃣ আপনার Group select করুন\n"
+        "1️⃣ নিচের Add Button চাপুন\n"
+        "2️⃣ আপনার Group নির্বাচন করুন\n"
         "3️⃣ Bot-কে Administrator করুন\n"
-        "4️⃣ Join Request manage করার permission দিন\n\n"
+        "4️⃣ <b>Invite Users via Link</b> permission দিন\n\n"
         "Bot Admin হলে Group automatically "
-        "<b>My Groups</b>-এ যুক্ত হবে.",
+        "আপনার My Groups list-এ যুক্ত হবে.",
         parse_mode="HTML",
         reply_markup=keyboard
     )
@@ -635,20 +621,19 @@ async def add_group(
 # BOT ADDED / PROMOTED
 # =========================================================
 
-async def bot_membership_update(
+async def bot_chat_member_update(
     update,
     context
 ):
 
-    member_update = update.my_chat_member
+    event = update.my_chat_member
 
-    if not member_update:
+    if not event:
         return
 
-    chat = member_update.chat
-    new_member = member_update.new_chat_member
+    chat = event.chat
+    new_member = event.new_chat_member
 
-    # Only groups/supergroups/channels
     if chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP,
@@ -656,10 +641,19 @@ async def bot_membership_update(
     ):
         return
 
+    # Bot must be administrator
     if new_member.status != "administrator":
+
+        if new_member.status in (
+            "left",
+            "kicked"
+        ):
+
+            delete_chat(chat.id)
+
         return
 
-    # Must be able to manage join requests
+    # Join-request permission
     can_invite = getattr(
         new_member,
         "can_invite_users",
@@ -671,13 +665,15 @@ async def bot_membership_update(
         try:
 
             await context.bot.send_message(
-                chat_id=member_update.from_user.id,
+                chat_id=event.from_user.id,
                 text=(
-                    f"⚠️ <b>{escape(chat.title or 'Chat')}</b>\n\n"
-                    "আমি Admin হয়েছি, কিন্তু "
-                    "<b>Invite Users via Link / Join Requests</b> "
-                    "permission নেই.\n\n"
-                    "এই permission দিন তারপর আবার চেষ্টা করুন."
+                    "⚠️ <b>Permission Required</b>\n\n"
+                    f"Chat: <b>{escape(chat.title or '')}</b>\n\n"
+                    "Bot Admin হয়েছে, কিন্তু "
+                    "<b>Invite Users via Link</b> permission "
+                    "দেওয়া হয়নি.\n\n"
+                    "এই permission দিন যাতে Bot Join Request "
+                    "receive এবং approve করতে পারে."
                 ),
                 parse_mode="HTML"
             )
@@ -687,30 +683,27 @@ async def bot_membership_update(
 
         return
 
-    owner_id = member_update.from_user.id
-
+    # Save chat
     save_chat(
         chat,
-        owner_id,
-        auto_accept=1
+        event.from_user.id
     )
 
     logger.info(
-        "Chat registered: %s (%s), owner=%s",
+        "Registered chat: %s (%s)",
         chat.title,
-        chat.id,
-        owner_id
+        chat.id
     )
 
+    # Notify person who added/promoted bot
     try:
 
         await context.bot.send_message(
-            chat_id=owner_id,
+            chat_id=event.from_user.id,
             text=(
                 "✅ <b>Bot Added Successfully!</b>\n\n"
                 f"📢 Chat: <b>{escape(chat.title or '')}</b>\n"
-                f"🔗 ID: <code>{chat.id}</code>\n"
-                "⚙️ Auto-approve: <b>Enabled</b>\n\n"
+                f"⚙️ Auto-approve: <b>Enabled</b>\n\n"
                 "The bot is now ready to manage "
                 "join requests."
             ),
@@ -718,18 +711,18 @@ async def bot_membership_update(
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "⚙️ Manage",
+                        "⚙️ Manage Chat",
                         callback_data=f"manage:{chat.id}"
                     )
                 ]
             ])
         )
 
-    except Exception as e:
+    except Exception as error:
 
         logger.warning(
-            "Could not notify owner: %s",
-            e
+            "Could not notify admin: %s",
+            error
         )
 
 
@@ -748,14 +741,27 @@ async def my_channels(
 
     rows = get_user_chats(
         query.from_user.id,
-        ChatType.CHANNEL
+        [ChatType.CHANNEL]
     )
 
-    if not rows:
+    # Verify the user is currently admin
+    valid_rows = []
+
+    for row in rows:
+
+        if await is_chat_admin(
+            context.bot,
+            row["chat_id"],
+            query.from_user.id
+        ):
+
+            valid_rows.append(row)
+
+    if not valid_rows:
 
         await query.edit_message_text(
             "📋 <b>My Channels</b>\n\n"
-            "কোনো Channel এখনো যুক্ত করা হয়নি.",
+            "আপনার কোনো Channel এখনো যুক্ত নেই.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [
@@ -767,7 +773,7 @@ async def my_channels(
                 [
                     InlineKeyboardButton(
                         "⬅️ Back",
-                        callback_data="back_menu"
+                        callback_data="back"
                     )
                 ]
             ])
@@ -777,9 +783,9 @@ async def my_channels(
 
     buttons = []
 
-    for row in rows:
+    for row in valid_rows:
 
-        state = (
+        status = (
             "🟢"
             if row["auto_accept"]
             else "🔴"
@@ -787,7 +793,7 @@ async def my_channels(
 
         buttons.append([
             InlineKeyboardButton(
-                f"{state} {row['title'][:30]}",
+                f"{status} {row['title'][:35]}",
                 callback_data=f"manage:{row['chat_id']}"
             )
         ])
@@ -795,13 +801,13 @@ async def my_channels(
     buttons.append([
         InlineKeyboardButton(
             "⬅️ Back",
-            callback_data="back_menu"
+            callback_data="back"
         )
     ])
 
     await query.edit_message_text(
         "📋 <b>My Channels</b>\n\n"
-        "যে Channel manage করতে চান সেটি নির্বাচন করুন:",
+        "Manage করতে Channel নির্বাচন করুন:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
@@ -822,21 +828,29 @@ async def my_groups(
 
     rows = get_user_chats(
         query.from_user.id,
-        ChatType.GROUP
+        [
+            ChatType.GROUP,
+            ChatType.SUPERGROUP
+        ]
     )
 
-    supergroups = get_user_chats(
-        query.from_user.id,
-        ChatType.SUPERGROUP
-    )
+    valid_rows = []
 
-    rows = list(rows) + list(supergroups)
+    for row in rows:
 
-    if not rows:
+        if await is_chat_admin(
+            context.bot,
+            row["chat_id"],
+            query.from_user.id
+        ):
+
+            valid_rows.append(row)
+
+    if not valid_rows:
 
         await query.edit_message_text(
             "👥 <b>My Groups</b>\n\n"
-            "কোনো Group এখনো যুক্ত করা হয়নি.",
+            "আপনার কোনো Group এখনো যুক্ত নেই.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [
@@ -848,7 +862,7 @@ async def my_groups(
                 [
                     InlineKeyboardButton(
                         "⬅️ Back",
-                        callback_data="back_menu"
+                        callback_data="back"
                     )
                 ]
             ])
@@ -858,9 +872,9 @@ async def my_groups(
 
     buttons = []
 
-    for row in rows:
+    for row in valid_rows:
 
-        state = (
+        status = (
             "🟢"
             if row["auto_accept"]
             else "🔴"
@@ -868,7 +882,7 @@ async def my_groups(
 
         buttons.append([
             InlineKeyboardButton(
-                f"{state} {row['title'][:30]}",
+                f"{status} {row['title'][:35]}",
                 callback_data=f"manage:{row['chat_id']}"
             )
         ])
@@ -876,13 +890,13 @@ async def my_groups(
     buttons.append([
         InlineKeyboardButton(
             "⬅️ Back",
-            callback_data="back_menu"
+            callback_data="back"
         )
     ])
 
     await query.edit_message_text(
         "👥 <b>My Groups</b>\n\n"
-        "যে Group manage করতে চান সেটি নির্বাচন করুন:",
+        "Manage করতে Group নির্বাচন করুন:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
@@ -894,44 +908,43 @@ async def my_groups(
 
 async def manage_chat(
     update,
-    context
+    context,
+    chat_id=None
 ):
 
     query = update.callback_query
 
-    await query.answer()
-
-    chat_id = int(
-        query.data.split(":")[1]
-    )
+    if chat_id is None:
+        chat_id = int(
+            query.data.split(":")[1]
+        )
 
     row = get_chat(chat_id)
 
     if not row:
 
-        await query.edit_message_text(
-            "❌ Chat পাওয়া যায়নি."
+        await query.answer(
+            "Chat not found.",
+            show_alert=True
         )
 
         return
 
-    # Security
-    if row["owner_id"] != query.from_user.id:
+    # User must currently be admin
+    if not await is_chat_admin(
+        context.bot,
+        chat_id,
+        query.from_user.id
+    ):
 
-        admin = await user_is_admin(
-            context.bot,
-            chat_id,
-            query.from_user.id
+        await query.answer(
+            "❌ আপনি এই Chat-এর Admin নন.",
+            show_alert=True
         )
 
-        if not admin:
+        return
 
-            await query.answer(
-                "❌ You are not an admin of this chat.",
-                show_alert=True
-            )
-
-            return
+    await query.answer()
 
     state = (
         "🟢 ENABLED"
@@ -942,20 +955,14 @@ async def manage_chat(
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "🟢 Enable Auto Accept",
-                callback_data=f"enable:{chat_id}"
+                "🟢 Auto Accept ON",
+                callback_data=f"on:{chat_id}"
             )
         ],
         [
             InlineKeyboardButton(
-                "🔴 Disable Auto Accept",
-                callback_data=f"disable:{chat_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📊 Refresh",
-                callback_data=f"manage:{chat_id}"
+                "🔴 Auto Accept OFF",
+                callback_data=f"off:{chat_id}"
             )
         ],
         [
@@ -967,84 +974,68 @@ async def manage_chat(
         [
             InlineKeyboardButton(
                 "⬅️ Back",
-                callback_data="back_menu"
+                callback_data="back"
             )
         ]
     ])
 
     await query.edit_message_text(
-        "⚙️ <b>Chat Manager</b>\n\n"
+        "⚙️ <b>Manage Chat</b>\n\n"
         f"📢 <b>{escape(row['title'])}</b>\n\n"
         f"Auto Approve: <b>{state}</b>\n\n"
-        "Join Request এলে Auto Accept "
-        "ON থাকলে সঙ্গে সঙ্গে approve হবে.",
+        "🟢 ON = Join Request automatically approve\n"
+        "🔴 OFF = Request pending থাকবে",
         parse_mode="HTML",
         reply_markup=keyboard
     )
 
 
 # =========================================================
-# ENABLE / DISABLE
+# TOGGLE
 # =========================================================
 
-async def toggle_chat(
+async def toggle_auto_accept(
     update,
     context
 ):
 
     query = update.callback_query
 
-    await query.answer()
+    action, chat_id_text = query.data.split(":")
 
-    action, id_string = query.data.split(":")
+    chat_id = int(chat_id_text)
 
-    chat_id = int(id_string)
+    if not await is_chat_admin(
+        context.bot,
+        chat_id,
+        query.from_user.id
+    ):
 
-    row = get_chat(chat_id)
+        await query.answer(
+            "❌ শুধু ওই Chat-এর Admin এটি পরিবর্তন করতে পারবেন.",
+            show_alert=True
+        )
 
-    if not row:
         return
 
-    if row["owner_id"] != query.from_user.id:
+    set_auto_accept(
+        chat_id,
+        action == "on"
+    )
 
-        if not await user_is_admin(
-            context.bot,
-            chat_id,
-            query.from_user.id
-        ):
-
-            await query.answer(
-                "❌ Admin only.",
-                show_alert=True
-            )
-
-            return
-
-    if action == "enable":
-
-        set_auto_accept(
-            chat_id,
-            True
-        )
-
-    else:
-
-        set_auto_accept(
-            chat_id,
-            False
-        )
-
-    # Re-render
-    query.data = f"manage:{chat_id}"
+    await query.answer(
+        "Auto Accept updated."
+    )
 
     await manage_chat(
         update,
-        context
+        context,
+        chat_id
     )
 
 
 # =========================================================
-# REMOVE
+# REMOVE CHAT
 # =========================================================
 
 async def remove_chat_callback(
@@ -1054,43 +1045,36 @@ async def remove_chat_callback(
 
     query = update.callback_query
 
-    await query.answer()
-
     chat_id = int(
         query.data.split(":")[1]
     )
 
-    row = get_chat(chat_id)
+    if not await is_chat_admin(
+        context.bot,
+        chat_id,
+        query.from_user.id
+    ):
 
-    if not row:
+        await query.answer(
+            "❌ Admin only.",
+            show_alert=True
+        )
+
         return
 
-    if row["owner_id"] != query.from_user.id:
+    delete_chat(chat_id)
 
-        if not await user_is_admin(
-            context.bot,
-            chat_id,
-            query.from_user.id
-        ):
-
-            await query.answer(
-                "❌ Admin only.",
-                show_alert=True
-            )
-
-            return
-
-    remove_chat(chat_id)
+    await query.answer()
 
     await query.edit_message_text(
         "✅ <b>Chat Removed</b>\n\n"
-        "এই Chat আর Bot-এর managed list-এ নেই.",
+        "এই Chat আর Bot-এর managed list-এ থাকবে না.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
                     "⬅️ Main Menu",
-                    callback_data="back_menu"
+                    callback_data="back"
                 )
             ]
         ])
@@ -1116,18 +1100,23 @@ async def handle_join_request(
 
     row = get_chat(chat.id)
 
-    # If bot was added manually and database isn't ready
     if not row:
 
         logger.warning(
-            "Join request from unregistered chat: %s",
+            "Received request from unregistered chat: %s",
             chat.id
         )
 
         return
 
+    logger.info(
+        "Join request: user=%s chat=%s",
+        user.id,
+        chat.id
+    )
+
     # -----------------------------------------------------
-    # FIRST MESSAGE: REVIEW
+    # STEP 1: SEND REVIEW MESSAGE IMMEDIATELY
     # -----------------------------------------------------
 
     try:
@@ -1136,48 +1125,55 @@ async def handle_join_request(
             chat_id=request.user_chat_id,
             text=(
                 "⏳ <b>Your Join Request Has Been Received</b>\n\n"
-                f"📢 Chat: <b>{escape(chat.title or '')}</b>\n\n"
-                "🔎 Your request is being reviewed.\n"
+                f"📢 <b>{escape(chat.title or '')}</b>\n\n"
+                "🔎 <b>Your request is being reviewed.</b>\n"
                 "Please wait..."
             ),
             parse_mode="HTML"
         )
 
-    except Exception as e:
+    except Exception as error:
 
         logger.warning(
             "Could not send review message: %s",
-            e
+            error
         )
 
     # -----------------------------------------------------
-    # AUTO APPROVE
+    # STEP 2: CHECK AUTO ACCEPT
     # -----------------------------------------------------
 
     if not row["auto_accept"]:
 
         logger.info(
-            "Auto approve OFF: %s",
+            "Auto Accept OFF for chat %s",
             chat.id
         )
 
         return
 
+    # -----------------------------------------------------
+    # STEP 3: APPROVE
+    # -----------------------------------------------------
+
     try:
 
-        await request.approve()
+        await context.bot.approve_chat_join_request(
+            chat_id=chat.id,
+            user_id=user.id
+        )
 
         logger.info(
-            "Approved request: user=%s chat=%s",
+            "Join request approved: user=%s chat=%s",
             user.id,
             chat.id
         )
 
-    except Exception as e:
+    except Exception as error:
 
         logger.error(
             "Approve failed: %s",
-            e
+            error
         )
 
         try:
@@ -1186,7 +1182,7 @@ async def handle_join_request(
                 chat_id=request.user_chat_id,
                 text=(
                     "⚠️ <b>Your request could not be "
-                    "processed automatically.</b>\n\n"
+                    "approved automatically.</b>\n\n"
                     "Please wait for an administrator."
                 ),
                 parse_mode="HTML"
@@ -1198,7 +1194,7 @@ async def handle_join_request(
         return
 
     # -----------------------------------------------------
-    # APPROVED MESSAGE
+    # STEP 4: APPROVED MESSAGE
     # -----------------------------------------------------
 
     try:
@@ -1213,11 +1209,11 @@ async def handle_join_request(
             parse_mode="HTML"
         )
 
-    except Exception as e:
+    except Exception as error:
 
         logger.warning(
             "Could not send approval message: %s",
-            e
+            error
         )
 
 
@@ -1230,20 +1226,21 @@ async def help_command(
     context
 ):
 
-    if not await gate(
+    if not await check_gate(
         update,
         context
     ):
         return
 
     await update.effective_message.reply_text(
-        "ℹ️ <b>How to use</b>\n\n"
-        "1️⃣ Join the Required Channel\n"
-        "2️⃣ Open the Bot again\n"
-        "3️⃣ Add the Bot to your Group/Channel\n"
-        "4️⃣ Make it Administrator\n"
-        "5️⃣ Give Join Request permission\n"
-        "6️⃣ Manage Auto Accept from My Groups/My Channels.",
+        "ℹ️ <b>How It Works</b>\n\n"
+        "1️⃣ Required Channel-এ Join করুন\n"
+        "2️⃣ Add Channel অথবা Add Group চাপুন\n"
+        "3️⃣ Bot-কে Administrator করুন\n"
+        "4️⃣ Invite Users via Link permission দিন\n"
+        "5️⃣ My Channels/My Groups থেকে Chat manage করুন\n"
+        "6️⃣ Auto Accept ON করলে Join Request "
+        "সঙ্গে সঙ্গে approve হবে.",
         parse_mode="HTML"
     )
 
@@ -1252,7 +1249,7 @@ async def help_command(
 # BACK
 # =========================================================
 
-async def back_menu(
+async def back(
     update,
     context
 ):
@@ -1261,13 +1258,13 @@ async def back_menu(
 
     await query.answer()
 
-    if not await check_required_channel(
+    if not await is_required_channel_member(
         context.bot,
         query.from_user.id
-    ) and query.from_user.id != OWNER_ID:
+    ):
 
         await query.edit_message_text(
-            "🔒 Required Channel-এ Join করুন.",
+            "🔒 Required Channel-এ আগে Join করুন.",
             reply_markup=required_channel_keyboard()
         )
 
@@ -1317,25 +1314,26 @@ async def callback_router(
 ):
 
     query = update.callback_query
-
     data = query.data
 
-    # Required channel verification
+    # Membership button is allowed before membership
     if data == "check_membership":
-        await check_membership_button(
+
+        await check_membership(
             update,
             context
         )
+
         return
 
-    # Every other button requires membership
-    if not await check_required_channel(
+    # Everything else requires membership
+    if not await is_required_channel_member(
         context.bot,
         query.from_user.id
-    ) and query.from_user.id != OWNER_ID:
+    ):
 
         await query.answer(
-            "🔒 Join the Required Channel first.",
+            "🔒 আগে Required Channel-এ Join করুন.",
             show_alert=True
         )
 
@@ -1369,13 +1367,6 @@ async def callback_router(
             context
         )
 
-    elif data == "back_menu":
-
-        await back_menu(
-            update,
-            context
-        )
-
     elif data == "help":
 
         await help_command(
@@ -1383,11 +1374,11 @@ async def callback_router(
             context
         )
 
-    elif data == "refresh_chats":
+    elif data == "back":
 
-        await query.answer(
-            "🔄 Chat list updated.",
-            show_alert=True
+        await back(
+            update,
+            context
         )
 
     elif data.startswith("manage:"):
@@ -1397,16 +1388,16 @@ async def callback_router(
             context
         )
 
-    elif data.startswith("enable:"):
+    elif data.startswith("on:"):
 
-        await toggle_chat(
+        await toggle_auto_accept(
             update,
             context
         )
 
-    elif data.startswith("disable:"):
+    elif data.startswith("off:"):
 
-        await toggle_chat(
+        await toggle_auto_accept(
             update,
             context
         )
@@ -1420,35 +1411,7 @@ async def callback_router(
 
 
 # =========================================================
-# OWNER: REQUIRED CHANNEL STATUS
-# =========================================================
-
-async def required_command(
-    update,
-    context
-):
-
-    user = update.effective_user
-
-    if user.id != OWNER_ID:
-
-        await update.effective_message.reply_text(
-            "❌ Owner only."
-        )
-
-        return
-
-    await update.effective_message.reply_text(
-        "🔐 <b>Required Channel</b>\n\n"
-        f"Channel: <code>{escape(REQUIRED_CHANNEL)}</code>\n"
-        f"Link: {escape(REQUIRED_CHANNEL_LINK)}\n\n"
-        "এই Channel-এ Join না করলে Main Menu দেখা যাবে না.",
-        parse_mode="HTML"
-    )
-
-
-# =========================================================
-# ERROR
+# ERROR HANDLER
 # =========================================================
 
 async def error_handler(
@@ -1468,64 +1431,58 @@ async def error_handler(
 
 def main():
 
-    init_db()
+    init_database()
 
-    app = (
+    application = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # Private commands
-    app.add_handler(
+    # /start
+    application.add_handler(
         CommandHandler(
             "start",
             start
         )
     )
 
-    app.add_handler(
+    # /help
+    application.add_handler(
         CommandHandler(
             "help",
             help_command
         )
     )
 
-    app.add_handler(
-        CommandHandler(
-            "required",
-            required_command
-        )
-    )
-
     # Detect bot added/promoted
-    app.add_handler(
+    application.add_handler(
         ChatMemberHandler(
-            bot_membership_update,
+            bot_chat_member_update,
             ChatMemberHandler.MY_CHAT_MEMBER
         )
     )
 
-    # Join Requests
-    app.add_handler(
+    # Join requests
+    application.add_handler(
         ChatJoinRequestHandler(
             handle_join_request
         )
     )
 
-    # Buttons
-    app.add_handler(
+    # Inline buttons
+    application.add_handler(
         CallbackQueryHandler(
             callback_router
         )
     )
 
-    app.add_error_handler(
+    application.add_error_handler(
         error_handler
     )
 
     logger.info(
-        "======================================"
+        "========================================"
     )
 
     logger.info(
@@ -1538,10 +1495,10 @@ def main():
     )
 
     logger.info(
-        "======================================"
+        "========================================"
     )
 
-    app.run_polling(
+    application.run_polling(
         allowed_updates=[
             "message",
             "callback_query",
